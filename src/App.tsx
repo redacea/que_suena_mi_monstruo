@@ -6,6 +6,8 @@ import {
   useState,
   type PointerEvent,
 } from 'react'
+import './App.css'
+import monsterBackdrop from './assets/Paso 3.jpeg'
 
 type DrawingRecord = {
   id: string
@@ -34,9 +36,18 @@ type ActorState = {
   lastUpdatedAt: number
 }
 
+type Step = 'intro' | 'draw' | 'park'
+type CanvasCursor = {
+  x: number
+  y: number
+  visible: boolean
+}
+type CanvasSnapshot = ImageData | null
+
 const CANVAS_SIZE = 280
 const POPULATION_LIMIT = 24
-const BRUSH_COLORS = ['#0c4a6e', '#1d4d4f', '#b45309', '#be123c', '#4c1d95', '#111827']
+const BRUSH_COLORS = ['#000000', '#ffffff', '#eb5a46', '#48c0f0', '#f2dc36', '#58e63e', '#dc36e6', '#f0b63b']
+const BRUSH_SIZES = [4, 9, 16]
 const CHAT_LINES = [
   'Te subes conmigo, {name}?',
   'Ese salto ha sido de campeon.',
@@ -284,6 +295,68 @@ function isCanvasBlank(canvas: HTMLCanvasElement) {
   return true
 }
 
+function paintBrushDot(context: CanvasRenderingContext2D, point: { x: number; y: number }, size: number, color: string) {
+  context.fillStyle = color
+  context.beginPath()
+  context.arc(point.x, point.y, size / 2, 0, Math.PI * 2)
+  context.fill()
+}
+
+function paintBrushTrail(
+  context: CanvasRenderingContext2D,
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  size: number,
+  color: string,
+) {
+  const distance = Math.hypot(to.x - from.x, to.y - from.y)
+  const step = Math.max(size * 0.3, 1)
+  const steps = Math.max(1, Math.ceil(distance / step))
+
+  for (let index = 0; index <= steps; index += 1) {
+    const progress = index / steps
+    paintBrushDot(
+      context,
+      {
+        x: lerp(from.x, to.x, progress),
+        y: lerp(from.y, to.y, progress),
+      },
+      size,
+      color,
+    )
+  }
+}
+
+function snapshotCanvas(canvas: HTMLCanvasElement): CanvasSnapshot {
+  const context = canvas.getContext('2d')
+
+  if (!context || isCanvasBlank(canvas)) {
+    return null
+  }
+
+  return context.getImageData(0, 0, canvas.width, canvas.height)
+}
+
+function restoreCanvasSnapshot(canvas: HTMLCanvasElement, snapshot: CanvasSnapshot) {
+  const context = canvas.getContext('2d')
+
+  if (!context) {
+    return
+  }
+
+  context.clearRect(0, 0, canvas.width, canvas.height)
+
+  if (!snapshot) {
+    return
+  }
+
+  context.putImageData(snapshot, 0, 0)
+}
+
+function isImageDataSnapshot(snapshot: CanvasSnapshot | string | undefined): snapshot is ImageData {
+  return Boolean(snapshot && typeof snapshot === 'object' && 'data' in snapshot)
+}
+
 function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const isDrawingRef = useRef(false)
@@ -294,10 +367,14 @@ function App() {
   const [actors, setActors] = useState<ActorState[]>([])
   const [creatureName, setCreatureName] = useState('')
   const [brushColor, setBrushColor] = useState(BRUSH_COLORS[0])
-  const [brushSize, setBrushSize] = useState(8)
+  const [brushSize, setBrushSize] = useState(BRUSH_SIZES[1])
   const [formMessage, setFormMessage] = useState('')
   const [isSaving, setIsSaving] = useState(false)
   const [loadError, setLoadError] = useState('')
+  const [currentStep, setCurrentStep] = useState<Step>('intro')
+  const [canvasCursor, setCanvasCursor] = useState<CanvasCursor>({ x: 0, y: 0, visible: false })
+  const [undoStack, setUndoStack] = useState<CanvasSnapshot[]>([null])
+  const [redoStack, setRedoStack] = useState<CanvasSnapshot[]>([])
 
   const refreshDrawings = useEffectEvent(async () => {
     try {
@@ -342,6 +419,22 @@ function App() {
   }, [brushColor, brushSize])
 
   useEffect(() => {
+    if (currentStep !== 'draw') {
+      return
+    }
+
+    const canvas = canvasRef.current
+    const context = canvas?.getContext('2d')
+
+    if (!canvas || !context) {
+      return
+    }
+
+    const currentSnapshot = undoStack[undoStack.length - 1] ?? null
+    restoreCanvasSnapshot(canvas, currentSnapshot)
+  }, [currentStep, undoStack])
+
+  useEffect(() => {
     void refreshDrawings()
 
     const intervalId = window.setInterval(() => {
@@ -382,6 +475,36 @@ function App() {
     }
   }
 
+  function pushCanvasHistory() {
+    const canvas = canvasRef.current
+
+    if (!canvas) {
+      return
+    }
+
+    const nextSnapshot = snapshotCanvas(canvas)
+
+    setUndoStack((current) => {
+      const previousSnapshot = current[current.length - 1]
+
+      if (
+        isImageDataSnapshot(previousSnapshot) &&
+        isImageDataSnapshot(nextSnapshot) &&
+        previousSnapshot.data.length === nextSnapshot.data.length &&
+        previousSnapshot.data.every((value, index) => value === nextSnapshot.data[index])
+      ) {
+        return current
+      }
+
+      if (!previousSnapshot && !nextSnapshot) {
+        return current
+      }
+
+      return [...current, nextSnapshot]
+    })
+    setRedoStack([])
+  }
+
   function beginStroke(event: PointerEvent<HTMLCanvasElement>) {
     const context = canvasRef.current?.getContext('2d')
 
@@ -390,17 +513,18 @@ function App() {
     }
 
     const point = toCanvasPoint(event)
+    setCanvasCursor({ x: point.x, y: point.y, visible: true })
     isDrawingRef.current = true
     lastPointRef.current = point
 
-    context.strokeStyle = brushColor
-    context.lineWidth = brushSize
-    context.beginPath()
-    context.moveTo(point.x, point.y)
+    paintBrushDot(context, point, brushSize, brushColor)
     event.currentTarget.setPointerCapture(event.pointerId)
   }
 
   function continueStroke(event: PointerEvent<HTMLCanvasElement>) {
+    const point = toCanvasPoint(event)
+    setCanvasCursor({ x: point.x, y: point.y, visible: true })
+
     if (!isDrawingRef.current) {
       return
     }
@@ -412,17 +536,26 @@ function App() {
       return
     }
 
-    const point = toCanvasPoint(event)
-    context.beginPath()
-    context.moveTo(lastPoint.x, lastPoint.y)
-    context.lineTo(point.x, point.y)
-    context.stroke()
+    paintBrushTrail(context, lastPoint, point, brushSize, brushColor)
     lastPointRef.current = point
   }
 
   function finishStroke() {
+    if (isDrawingRef.current) {
+      pushCanvasHistory()
+    }
+
     isDrawingRef.current = false
     lastPointRef.current = null
+  }
+
+  function showCanvasCursor(event: PointerEvent<HTMLCanvasElement>) {
+    const point = toCanvasPoint(event)
+    setCanvasCursor({ x: point.x, y: point.y, visible: true })
+  }
+
+  function hideCanvasCursor() {
+    setCanvasCursor((current) => ({ ...current, visible: false }))
   }
 
   function clearCanvas() {
@@ -434,7 +567,41 @@ function App() {
     }
 
     context.clearRect(0, 0, canvas.width, canvas.height)
+    setUndoStack([null])
+    setRedoStack([])
     setFormMessage('')
+  }
+
+  function undoDrawing() {
+    setUndoStack((current) => {
+      if (current.length <= 1) {
+        return current
+      }
+
+      const previousSnapshot = current[current.length - 1]
+      setRedoStack((redoCurrent) => [previousSnapshot, ...redoCurrent])
+      return current.slice(0, -1)
+    })
+  }
+
+  function redoDrawing() {
+    setRedoStack((current) => {
+      if (current.length === 0) {
+        return current
+      }
+
+      const [nextSnapshot, ...rest] = current
+      setUndoStack((undoCurrent) => [...undoCurrent, nextSnapshot])
+      return rest
+    })
+  }
+
+  function restartDrawing() {
+    setCreatureName('')
+    setBrushColor(BRUSH_COLORS[0])
+    setBrushSize(BRUSH_SIZES[1])
+    clearCanvas()
+    setCurrentStep('draw')
   }
 
   async function saveDrawing() {
@@ -477,6 +644,7 @@ function App() {
       setCreatureName('')
       clearCanvas()
       setFormMessage('Tu dibujo ya esta paseando por el parque.')
+      setCurrentStep('park')
     } catch {
       setFormMessage('Fallo al guardar. Prueba otra vez.')
     } finally {
@@ -497,259 +665,304 @@ function App() {
   const booth = toScenePoint(118, 222)
 
   return (
-    <main className="app-shell">
-      <header className="app-header">
-        <div>
-          <p className="eyebrow">Parque de criaturas dibujadas</p>
-          <h1>Tu dibujo entra en escena y se cruza con el resto del mundo.</h1>
-          <p className="lede">
-            Dibuja un personaje, confirrmalo y quedara guardado para quienes visiten la web.
-            Cada criatura recorre un parque de atracciones isometrico, salta sin avisar y se
-            para a charlar cuando encuentra a otra por el camino.
-          </p>
-        </div>
-        <div className="status-panel">
-          <div>
-            <span>Habitantes</span>
-            <strong>{drawings.length}</strong>
-          </div>
-          <div>
-            <span>Charlas activas</span>
-            <strong>{activeChats}</strong>
-          </div>
-          <div>
-            <span>Ultimo en llegar</span>
-            <strong>{newestCreature}</strong>
-          </div>
-        </div>
-      </header>
+    <main className="dream-app">
+      <section className="dream-stage">
+        {currentStep === 'intro' ? (
+          <div className="step-screen step-screen--intro">
+            <img className="stage-image" src={monsterBackdrop} alt="Pantalla de inicio del monstruo" />
 
-      <section className="experience-grid">
-        <section className="studio-panel panel-card">
-          <div className="panel-heading">
-            <div>
-              <p className="panel-kicker">Estudio</p>
-              <h2>Dibuja un nuevo visitante</h2>
+            <div className="intro-overlay">
+              <h1 className="intro-title">¿QUÉ SUEÑA MI MONSTRUO?</h1>
+
+              <button type="button" className="monster-action monster-action--start" onClick={() => setCurrentStep('draw')}>
+                Empezar
+              </button>
             </div>
-            <p className="panel-note">PNG transparente, listo para entrar en el parque.</p>
           </div>
+        ) : null}
 
-          <label className="field-label" htmlFor="creature-name">
-            Nombre del personaje
-          </label>
-          <input
-            id="creature-name"
-            className="text-input"
-            maxLength={24}
-            placeholder="Ej. Monstruo trompetista"
-            value={creatureName}
-            onChange={(event) => setCreatureName(event.target.value)}
-          />
+        {currentStep === 'draw' ? (
+          <div className="step-screen step-screen--draw">
+            <img className="stage-image" src={monsterBackdrop} alt="Zona de dibujo del monstruo" />
 
-          <div className="canvas-frame">
-            <canvas
-              ref={canvasRef}
-              className="drawing-canvas"
-              width={CANVAS_SIZE}
-              height={CANVAS_SIZE}
-              onPointerCancel={finishStroke}
-              onPointerDown={beginStroke}
-              onPointerLeave={finishStroke}
-              onPointerMove={continueStroke}
-              onPointerUp={finishStroke}
-            />
-          </div>
-
-          <div className="brush-row">
-            <div>
-              <span className="field-label">Color</span>
-              <div className="swatch-row">
-                {BRUSH_COLORS.map((color) => (
-                  <button
-                    key={color}
-                    type="button"
-                    aria-label={`Usar ${color}`}
-                    className={color === brushColor ? 'swatch is-selected' : 'swatch'}
-                    style={{ backgroundColor: color }}
-                    onClick={() => setBrushColor(color)}
-                  />
-                ))}
-              </div>
-            </div>
-
-            <label className="slider-block" htmlFor="brush-size">
-              <span className="field-label">Grosor</span>
-              <input
-                id="brush-size"
-                type="range"
-                min="3"
-                max="22"
-                value={brushSize}
-                onChange={(event) => setBrushSize(Number(event.target.value))}
-              />
-            </label>
-          </div>
-
-          <div className="action-row">
-            <button type="button" className="secondary-button" onClick={clearCanvas}>
-              Limpiar
-            </button>
-            <button type="button" className="primary-button" disabled={isSaving} onClick={saveDrawing}>
-              {isSaving ? 'Guardando...' : 'Confirmar dibujo'}
-            </button>
-          </div>
-
-          <p className="feedback-line">{formMessage || 'Consejo: siluetas simples se leen mejor en el parque.'}</p>
-
-          <div className="gallery-block">
-            <div className="panel-heading compact">
-              <div>
-                <p className="panel-kicker">Coleccion viva</p>
-                <h2>Ultimos personajes</h2>
-              </div>
-            </div>
-
-            <div className="creature-grid">
-              {drawings.map((drawing) => (
-                <article key={drawing.id} className="creature-card">
-                  <img src={drawing.imageData} alt={drawing.name} />
-                  <div>
-                    <strong>{drawing.name}</strong>
-                    <span>
-                      {new Date(drawing.createdAt).toLocaleTimeString('es-ES', {
-                        hour: '2-digit',
-                        minute: '2-digit',
-                      })}
-                    </span>
+            <div className="draw-overlay">
+              <div className="draw-workspace">
+                <div className="draw-tools draw-tools--sizes" aria-label="Herramientas de pincel">
+                  <div className="draw-tools__icon" aria-hidden="true">
+                    <span className="draw-pencil">✎</span>
                   </div>
-                </article>
-              ))}
-              {drawings.length === 0 ? (
-                <p className="empty-state">Aun no hay personajes guardados. El primero puede ser tuyo.</p>
-              ) : null}
-            </div>
-          </div>
-        </section>
 
-        <section className="park-panel panel-card">
-          <div className="panel-heading">
-            <div>
-              <p className="panel-kicker">Parque</p>
-              <h2>Paseo isometrico compartido</h2>
-            </div>
-            <p className="panel-note">Se actualiza automaticamente para que aparezcan nuevas criaturas.</p>
-          </div>
+                  {BRUSH_SIZES.map((size) => (
+                    <button
+                      key={size}
+                      type="button"
+                      aria-label={`Usar grosor ${size}`}
+                      className={size === brushSize ? 'tool-square is-active' : 'tool-square'}
+                      onClick={() => setBrushSize(size)}
+                    >
+                      <span
+                        className="tool-square__dot"
+                        style={{
+                          width: `${Math.max(8, size + 4)}px`,
+                          height: `${Math.max(8, size + 4)}px`,
+                        }}
+                      />
+                    </button>
+                  ))}
+                </div>
 
-          <div className="park-scene">
-            <svg
-              className="park-svg"
-              viewBox="0 0 900 620"
-              role="img"
-              aria-label="Parque de atracciones isometrico con personajes paseando"
-            >
-              <defs>
-                <linearGradient id="skyGlow" x1="0" x2="1" y1="0" y2="1">
-                  <stop offset="0%" stopColor="#fff7d1" />
-                  <stop offset="100%" stopColor="#ffd8b2" />
-                </linearGradient>
-                <linearGradient id="grassTone" x1="0" x2="1" y1="0" y2="1">
-                  <stop offset="0%" stopColor="#9fd29a" />
-                  <stop offset="100%" stopColor="#5f9a68" />
-                </linearGradient>
-                <linearGradient id="pathTone" x1="0" x2="1" y1="0" y2="1">
-                  <stop offset="0%" stopColor="#ffe6c6" />
-                  <stop offset="100%" stopColor="#efbf84" />
-                </linearGradient>
-              </defs>
+                <div className="draw-board">
+                  <div className="draw-canvas-wrap">
+                    <canvas
+                      ref={canvasRef}
+                      className="drawing-canvas"
+                      width={CANVAS_SIZE}
+                      height={CANVAS_SIZE}
+                      aria-label="Lienzo para dibujar lo que imagina el monstruo"
+                      onPointerCancel={() => {
+                        finishStroke()
+                        hideCanvasCursor()
+                      }}
+                      onPointerDown={beginStroke}
+                      onPointerEnter={showCanvasCursor}
+                      onPointerLeave={() => {
+                        finishStroke()
+                        hideCanvasCursor()
+                      }}
+                      onPointerMove={continueStroke}
+                      onPointerUp={finishStroke}
+                    />
 
-              <ellipse cx="450" cy="160" rx="340" ry="120" fill="url(#skyGlow)" opacity="0.42" />
-              <polygon points="450,86 778,250 450,418 122,250" fill="url(#grassTone)" stroke="#3f7b58" strokeWidth="6" />
-              <polygon points="450,140 715,250 450,382 185,250" fill="#86be7d" opacity="0.55" />
+                    <span
+                      aria-hidden="true"
+                      className={canvasCursor.visible ? 'draw-cursor is-visible' : 'draw-cursor'}
+                      style={{
+                        left: `${(canvasCursor.x / CANVAS_SIZE) * 100}%`,
+                        top: `${(canvasCursor.y / CANVAS_SIZE) * 100}%`,
+                        width: `${(Math.max(brushSize, 10) / CANVAS_SIZE) * 100}%`,
+                        height: `${(Math.max(brushSize, 10) / CANVAS_SIZE) * 100}%`,
+                        borderColor: brushColor === '#ffffff' ? '#111111' : brushColor,
+                      }}
+                    />
+                  </div>
+                </div>
 
-              <polyline points={polyline} fill="none" stroke="#f7edd7" strokeWidth="44" strokeLinejoin="round" strokeLinecap="round" />
-              <polyline points={polyline} fill="none" stroke="url(#pathTone)" strokeWidth="28" strokeLinejoin="round" strokeLinecap="round" />
-              <polyline points={polyline} fill="none" stroke="#c8864f" strokeWidth="4" strokeLinejoin="round" strokeLinecap="round" strokeDasharray="10 10" opacity="0.6" />
+                <div className="draw-tools draw-tools--colors" aria-label="Paleta de color">
+                  {BRUSH_COLORS.map((color) => (
+                    <button
+                      key={color}
+                      type="button"
+                      aria-label={`Usar ${color}`}
+                      className={color === brushColor ? 'color-swatch is-active' : 'color-swatch'}
+                      style={{ backgroundColor: color }}
+                      onClick={() => setBrushColor(color)}
+                    />
+                  ))}
+                </div>
+              </div>
 
-              <ellipse cx={ferrisWheel.x} cy={ferrisWheel.y + 58} rx="52" ry="16" fill="#426b56" opacity="0.22" />
-              <circle cx={ferrisWheel.x} cy={ferrisWheel.y} r="50" fill="#f9fbff" stroke="#335d7e" strokeWidth="8" />
-              <line x1={ferrisWheel.x - 50} y1={ferrisWheel.y} x2={ferrisWheel.x + 50} y2={ferrisWheel.y} stroke="#335d7e" strokeWidth="6" />
-              <line x1={ferrisWheel.x} y1={ferrisWheel.y - 50} x2={ferrisWheel.x} y2={ferrisWheel.y + 50} stroke="#335d7e" strokeWidth="6" />
-              <line x1={ferrisWheel.x - 36} y1={ferrisWheel.y - 36} x2={ferrisWheel.x + 36} y2={ferrisWheel.y + 36} stroke="#335d7e" strokeWidth="6" />
-              <line x1={ferrisWheel.x + 36} y1={ferrisWheel.y - 36} x2={ferrisWheel.x - 36} y2={ferrisWheel.y + 36} stroke="#335d7e" strokeWidth="6" />
-              <path d={`M ${ferrisWheel.x - 22} ${ferrisWheel.y + 58} L ${ferrisWheel.x} ${ferrisWheel.y + 6} L ${ferrisWheel.x + 22} ${ferrisWheel.y + 58}`} fill="none" stroke="#335d7e" strokeWidth="8" strokeLinecap="round" />
+              <div className="draw-name-field">
+                <label className="draw-name-label" htmlFor="creature-name">
+                  Nombre del personaje
+                </label>
 
-              <ellipse cx={carousel.x} cy={carousel.y + 50} rx="54" ry="16" fill="#426b56" opacity="0.2" />
-              <ellipse cx={carousel.x} cy={carousel.y + 18} rx="52" ry="18" fill="#ffddb0" stroke="#b15d32" strokeWidth="6" />
-              <path d={`M ${carousel.x - 52} ${carousel.y + 18} L ${carousel.x} ${carousel.y - 42} L ${carousel.x + 52} ${carousel.y + 18}`} fill="#ff7a59" stroke="#b15d32" strokeWidth="6" />
-              <line x1={carousel.x} y1={carousel.y - 42} x2={carousel.x} y2={carousel.y + 34} stroke="#b15d32" strokeWidth="6" />
-              <line x1={carousel.x - 28} y1={carousel.y - 8} x2={carousel.x - 28} y2={carousel.y + 32} stroke="#b15d32" strokeWidth="5" />
-              <line x1={carousel.x + 28} y1={carousel.y - 8} x2={carousel.x + 28} y2={carousel.y + 32} stroke="#b15d32" strokeWidth="5" />
+                <input
+                  id="creature-name"
+                  type="text"
+                  className="draw-name-input"
+                  value={creatureName}
+                  maxLength={32}
+                  placeholder="Ponle un nombre"
+                  onChange={(event) => setCreatureName(event.target.value)}
+                />
+              </div>
 
-              <ellipse cx={fountain.x} cy={fountain.y + 16} rx="42" ry="14" fill="#426b56" opacity="0.2" />
-              <ellipse cx={fountain.x} cy={fountain.y} rx="38" ry="14" fill="#d1f0ff" stroke="#4f8aa3" strokeWidth="6" />
-              <path d={`M ${fountain.x} ${fountain.y - 26} C ${fountain.x - 14} ${fountain.y - 10}, ${fountain.x - 10} ${fountain.y + 2}, ${fountain.x} ${fountain.y + 6} C ${fountain.x + 10} ${fountain.y + 2}, ${fountain.x + 14} ${fountain.y - 10}, ${fountain.x} ${fountain.y - 26}`} fill="#f3fbff" stroke="#4f8aa3" strokeWidth="4" />
+              <div className="draw-utility-actions">
+                <button
+                  type="button"
+                  className="utility-icon"
+                  disabled={undoStack.length <= 1}
+                  onClick={undoDrawing}
+                  aria-label="Deshacer"
+                >
+                  ↺
+                </button>
 
-              <ellipse cx={booth.x} cy={booth.y + 28} rx="46" ry="14" fill="#426b56" opacity="0.2" />
-              <rect x={booth.x - 38} y={booth.y - 10} width="76" height="36" rx="10" fill="#ffe7a3" stroke="#8d5b2b" strokeWidth="6" />
-              <path d={`M ${booth.x - 44} ${booth.y - 10} L ${booth.x} ${booth.y - 38} L ${booth.x + 44} ${booth.y - 10}`} fill="#ff6f61" stroke="#8d5b2b" strokeWidth="6" />
+                <button
+                  type="button"
+                  className="utility-icon"
+                  disabled={redoStack.length === 0}
+                  onClick={redoDrawing}
+                  aria-label="Rehacer"
+                >
+                  ↻
+                </button>
+              </div>
 
-              <ellipse cx={coasterA.x} cy={coasterA.y + 48} rx="96" ry="18" fill="#426b56" opacity="0.2" />
-              <path d={`M ${coasterA.x - 90} ${coasterA.y + 12} C ${coasterA.x - 40} ${coasterA.y - 70}, ${coasterB.x - 30} ${coasterB.y - 110}, ${coasterB.x} ${coasterB.y - 36} S ${coasterA.x + 54} ${coasterA.y + 34}, ${coasterA.x + 94} ${coasterA.y - 16}`} fill="none" stroke="#324f74" strokeWidth="8" strokeLinecap="round" />
-              <path d={`M ${coasterA.x - 90} ${coasterA.y + 32} C ${coasterA.x - 40} ${coasterA.y - 50}, ${coasterB.x - 30} ${coasterB.y - 90}, ${coasterB.x} ${coasterB.y - 16} S ${coasterA.x + 54} ${coasterA.y + 54}, ${coasterA.x + 94} ${coasterA.y + 4}`} fill="none" stroke="#f06d43" strokeWidth="8" strokeLinecap="round" />
-              <line x1={coasterA.x - 62} y1={coasterA.y + 20} x2={coasterA.x - 62} y2={coasterA.y + 70} stroke="#324f74" strokeWidth="6" />
-              <line x1={coasterA.x - 2} y1={coasterA.y - 24} x2={coasterA.x - 2} y2={coasterA.y + 68} stroke="#324f74" strokeWidth="6" />
-              <line x1={coasterA.x + 54} y1={coasterA.y + 12} x2={coasterA.x + 54} y2={coasterA.y + 66} stroke="#324f74" strokeWidth="6" />
-
-              <g className="park-labels">
-                <text x={ferrisWheel.x} y={ferrisWheel.y - 72}>Noria</text>
-                <text x={carousel.x} y={carousel.y - 62}>Carrusel</text>
-                <text x={coasterB.x + 42} y={coasterB.y - 118}>Montana rusa</text>
-                <text x={fountain.x} y={fountain.y - 34}>Fuente</text>
-              </g>
-            </svg>
-
-            {actors.map((actor) => {
-              const worldPoint = getPathPoint(actor.routeIndex, actor.progress)
-              const screenPoint = toScenePoint(
-                worldPoint.x + actor.laneOffset,
-                worldPoint.y - actor.laneOffset,
-                getHopOffset(actor, now),
-              )
-
-              return (
-                <div
-                  key={actor.id}
-                  className={actor.conversationUntil > now ? 'park-actor is-chatting' : 'park-actor'}
-                  style={{
-                    left: `${screenPoint.x}px`,
-                    top: `${screenPoint.y}px`,
-                    width: `${actor.size}px`,
-                    zIndex: Math.round(screenPoint.y),
+              <div className="draw-main-actions">
+                <button
+                  type="button"
+                  className="monster-action monster-action--cancel"
+                  onClick={() => {
+                    clearCanvas()
+                    setCreatureName('')
+                    setCurrentStep('intro')
                   }}
                 >
-                  <div className="actor-shadow" />
-                  <img
-                    src={actor.imageData}
-                    alt={actor.name}
-                    style={{ transform: `translate(-50%, -100%) scaleX(${actor.facing})` }}
-                  />
-                  {actor.conversationUntil > now && actor.phrase ? (
-                    <div className="speech-bubble">{actor.phrase}</div>
-                  ) : null}
+                  Cancelar
+                </button>
+
+                <button
+                  type="button"
+                  className="monster-action monster-action--done"
+                  disabled={isSaving}
+                  onClick={saveDrawing}
+                >
+                  {isSaving ? 'Guardando' : 'Listo'}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {currentStep === 'park' ? (
+          <div className="step-screen step-screen--park">
+            <img className="stage-image" src={monsterBackdrop} alt="Monstruo imaginando el parque" />
+
+            <div className="park-overlay">
+              <div className="park-window">
+                <div className="park-scene">
+                  <svg
+                    className="park-svg"
+                    viewBox="0 0 900 620"
+                    role="img"
+                    aria-label="Parque de atracciones isometrico con personajes paseando"
+                  >
+                    <defs>
+                      <linearGradient id="skyGlow" x1="0" x2="1" y1="0" y2="1">
+                        <stop offset="0%" stopColor="#fff7d1" />
+                        <stop offset="100%" stopColor="#ffd8b2" />
+                      </linearGradient>
+                      <linearGradient id="grassTone" x1="0" x2="1" y1="0" y2="1">
+                        <stop offset="0%" stopColor="#9fd29a" />
+                        <stop offset="100%" stopColor="#5f9a68" />
+                      </linearGradient>
+                      <linearGradient id="pathTone" x1="0" x2="1" y1="0" y2="1">
+                        <stop offset="0%" stopColor="#ffe6c6" />
+                        <stop offset="100%" stopColor="#efbf84" />
+                      </linearGradient>
+                    </defs>
+
+                    <ellipse cx="450" cy="160" rx="340" ry="120" fill="url(#skyGlow)" opacity="0.42" />
+                    <polygon points="450,86 778,250 450,418 122,250" fill="url(#grassTone)" stroke="#3f7b58" strokeWidth="6" />
+                    <polygon points="450,140 715,250 450,382 185,250" fill="#86be7d" opacity="0.55" />
+
+                    <polyline points={polyline} fill="none" stroke="#f7edd7" strokeWidth="44" strokeLinejoin="round" strokeLinecap="round" />
+                    <polyline points={polyline} fill="none" stroke="url(#pathTone)" strokeWidth="28" strokeLinejoin="round" strokeLinecap="round" />
+                    <polyline points={polyline} fill="none" stroke="#c8864f" strokeWidth="4" strokeLinejoin="round" strokeLinecap="round" strokeDasharray="10 10" opacity="0.6" />
+
+                    <ellipse cx={ferrisWheel.x} cy={ferrisWheel.y + 58} rx="52" ry="16" fill="#426b56" opacity="0.22" />
+                    <circle cx={ferrisWheel.x} cy={ferrisWheel.y} r="50" fill="#f9fbff" stroke="#335d7e" strokeWidth="8" />
+                    <line x1={ferrisWheel.x - 50} y1={ferrisWheel.y} x2={ferrisWheel.x + 50} y2={ferrisWheel.y} stroke="#335d7e" strokeWidth="6" />
+                    <line x1={ferrisWheel.x} y1={ferrisWheel.y - 50} x2={ferrisWheel.x} y2={ferrisWheel.y + 50} stroke="#335d7e" strokeWidth="6" />
+                    <line x1={ferrisWheel.x - 36} y1={ferrisWheel.y - 36} x2={ferrisWheel.x + 36} y2={ferrisWheel.y + 36} stroke="#335d7e" strokeWidth="6" />
+                    <line x1={ferrisWheel.x + 36} y1={ferrisWheel.y - 36} x2={ferrisWheel.x - 36} y2={ferrisWheel.y + 36} stroke="#335d7e" strokeWidth="6" />
+                    <path d={`M ${ferrisWheel.x - 22} ${ferrisWheel.y + 58} L ${ferrisWheel.x} ${ferrisWheel.y + 6} L ${ferrisWheel.x + 22} ${ferrisWheel.y + 58}`} fill="none" stroke="#335d7e" strokeWidth="8" strokeLinecap="round" />
+
+                    <ellipse cx={carousel.x} cy={carousel.y + 50} rx="54" ry="16" fill="#426b56" opacity="0.2" />
+                    <ellipse cx={carousel.x} cy={carousel.y + 18} rx="52" ry="18" fill="#ffddb0" stroke="#b15d32" strokeWidth="6" />
+                    <path d={`M ${carousel.x - 52} ${carousel.y + 18} L ${carousel.x} ${carousel.y - 42} L ${carousel.x + 52} ${carousel.y + 18}`} fill="#ff7a59" stroke="#b15d32" strokeWidth="6" />
+                    <line x1={carousel.x} y1={carousel.y - 42} x2={carousel.x} y2={carousel.y + 34} stroke="#b15d32" strokeWidth="6" />
+                    <line x1={carousel.x - 28} y1={carousel.y - 8} x2={carousel.x - 28} y2={carousel.y + 32} stroke="#b15d32" strokeWidth="5" />
+                    <line x1={carousel.x + 28} y1={carousel.y - 8} x2={carousel.x + 28} y2={carousel.y + 32} stroke="#b15d32" strokeWidth="5" />
+
+                    <ellipse cx={fountain.x} cy={fountain.y + 16} rx="42" ry="14" fill="#426b56" opacity="0.2" />
+                    <ellipse cx={fountain.x} cy={fountain.y} rx="38" ry="14" fill="#d1f0ff" stroke="#4f8aa3" strokeWidth="6" />
+                    <path d={`M ${fountain.x} ${fountain.y - 26} C ${fountain.x - 14} ${fountain.y - 10}, ${fountain.x - 10} ${fountain.y + 2}, ${fountain.x} ${fountain.y + 6} C ${fountain.x + 10} ${fountain.y + 2}, ${fountain.x + 14} ${fountain.y - 10}, ${fountain.x} ${fountain.y - 26}`} fill="#f3fbff" stroke="#4f8aa3" strokeWidth="4" />
+
+                    <ellipse cx={booth.x} cy={booth.y + 28} rx="46" ry="14" fill="#426b56" opacity="0.2" />
+                    <rect x={booth.x - 38} y={booth.y - 10} width="76" height="36" rx="10" fill="#ffe7a3" stroke="#8d5b2b" strokeWidth="6" />
+                    <path d={`M ${booth.x - 44} ${booth.y - 10} L ${booth.x} ${booth.y - 38} L ${booth.x + 44} ${booth.y - 10}`} fill="#ff6f61" stroke="#8d5b2b" strokeWidth="6" />
+
+                    <ellipse cx={coasterA.x} cy={coasterA.y + 48} rx="96" ry="18" fill="#426b56" opacity="0.2" />
+                    <path d={`M ${coasterA.x - 90} ${coasterA.y + 12} C ${coasterA.x - 40} ${coasterA.y - 70}, ${coasterB.x - 30} ${coasterB.y - 110}, ${coasterB.x} ${coasterB.y - 36} S ${coasterA.x + 54} ${coasterA.y + 34}, ${coasterA.x + 94} ${coasterA.y - 16}`} fill="none" stroke="#324f74" strokeWidth="8" strokeLinecap="round" />
+                    <path d={`M ${coasterA.x - 90} ${coasterA.y + 32} C ${coasterA.x - 40} ${coasterA.y - 50}, ${coasterB.x - 30} ${coasterB.y - 90}, ${coasterB.x} ${coasterB.y - 16} S ${coasterA.x + 54} ${coasterA.y + 54}, ${coasterA.x + 94} ${coasterA.y + 4}`} fill="none" stroke="#f06d43" strokeWidth="8" strokeLinecap="round" />
+                    <line x1={coasterA.x - 62} y1={coasterA.y + 20} x2={coasterA.x - 62} y2={coasterA.y + 70} stroke="#324f74" strokeWidth="6" />
+                    <line x1={coasterA.x - 2} y1={coasterA.y - 24} x2={coasterA.x - 2} y2={coasterA.y + 68} stroke="#324f74" strokeWidth="6" />
+                    <line x1={coasterA.x + 54} y1={coasterA.y + 12} x2={coasterA.x + 54} y2={coasterA.y + 66} stroke="#324f74" strokeWidth="6" />
+
+                    <g className="park-labels">
+                      <text x={ferrisWheel.x} y={ferrisWheel.y - 72}>Noria</text>
+                      <text x={carousel.x} y={carousel.y - 62}>Carrusel</text>
+                      <text x={coasterB.x + 42} y={coasterB.y - 118}>Montana rusa</text>
+                      <text x={fountain.x} y={fountain.y - 34}>Fuente</text>
+                    </g>
+                  </svg>
+
+                  {actors.map((actor) => {
+                    const worldPoint = getPathPoint(actor.routeIndex, actor.progress)
+                    const screenPoint = toScenePoint(
+                      worldPoint.x + actor.laneOffset,
+                      worldPoint.y - actor.laneOffset,
+                      getHopOffset(actor, now),
+                    )
+
+                    return (
+                      <div
+                        key={actor.id}
+                        className={actor.conversationUntil > now ? 'park-actor is-chatting' : 'park-actor'}
+                        style={{
+                          left: `${screenPoint.x}px`,
+                          top: `${screenPoint.y}px`,
+                          width: `${actor.size}px`,
+                          zIndex: Math.round(screenPoint.y),
+                        }}
+                      >
+                        <div className="actor-shadow" />
+                        <img
+                          src={actor.imageData}
+                          alt={actor.name}
+                          style={{ transform: `translate(-50%, -100%) scaleX(${actor.facing})` }}
+                        />
+                        {actor.conversationUntil > now && actor.phrase ? (
+                          <div className="speech-bubble">{actor.phrase}</div>
+                        ) : null}
+                      </div>
+                    )
+                  })}
                 </div>
-              )
-            })}
+              </div>
+            </div>
+
+            <div className="park-mask" aria-hidden="true" style={{ backgroundImage: `url(${monsterBackdrop})` }} />
+          </div>
+        ) : null}
+      </section>
+
+      {currentStep === 'park' ? (
+        <div className="park-summary">
+          <div className="park-info-row">
+            <div className="info-chip">
+              <span>Habitantes</span>
+              <strong>{drawings.length}</strong>
+            </div>
+            <div className="info-chip">
+              <span>Charlas</span>
+              <strong>{activeChats}</strong>
+            </div>
+            <div className="info-chip">
+              <span>Ultimo</span>
+              <strong>{newestCreature}</strong>
+            </div>
           </div>
 
-          <div className="world-footer">
-            <p>
-              Los visitantes se mueven en bucle por el camino central. Si dos se acercan lo
-              bastante, paran unos segundos y lanzan una frase aleatoria antes de seguir.
-            </p>
-            <p>{loadError || 'La coleccion se recarga cada pocos segundos para incorporar nuevos dibujos.'}</p>
-          </div>
-        </section>
-      </section>
+          <button type="button" className="park-restart" onClick={restartDrawing}>
+            Dibujar otro
+          </button>
+        </div>
+      ) : null}
+
+      <p className="stage-message">{loadError || formMessage || 'La coleccion se actualiza sola y conserva el parque vivo.'}</p>
     </main>
   )
 }
