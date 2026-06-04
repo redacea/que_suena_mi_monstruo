@@ -665,6 +665,7 @@ function App() {
 
   function updateHoveredActorFromPointer(event: PointerEvent<HTMLDivElement>) {
     const actorElements = event.currentTarget.querySelectorAll<HTMLElement>('.park-actor')
+    const floatingPopoverBounds = document.querySelector('.park-floating-popover')?.getBoundingClientRect()
     const hoverPadding = 28
     let nextHoveredActorId: string | null = null
 
@@ -674,7 +675,16 @@ function App() {
       }
 
       const bounds = actorElement.getBoundingClientRect()
-      const popoverBounds = actorElement.querySelector('.actor-popover')?.getBoundingClientRect()
+      const actorId = actorElement.dataset.actorId ?? null
+      const popoverBounds = actorId === hoveredActorIdRef.current ? floatingPopoverBounds : null
+      const connectorBounds = popoverBounds
+        ? {
+            left: Math.min(bounds.left, popoverBounds.left) - hoverPadding,
+            right: Math.max(bounds.right, popoverBounds.right) + hoverPadding,
+            top: Math.min(bounds.top, popoverBounds.top) - hoverPadding,
+            bottom: Math.max(bounds.bottom, popoverBounds.bottom) + hoverPadding,
+          }
+        : null
       const isInsideActor =
         event.clientX >= bounds.left - hoverPadding &&
         event.clientX <= bounds.right + hoverPadding &&
@@ -686,19 +696,20 @@ function App() {
           event.clientY >= popoverBounds.top &&
           event.clientY <= popoverBounds.bottom
         : false
+      const isInsideConnector = connectorBounds
+        ? event.clientX >= connectorBounds.left &&
+          event.clientX <= connectorBounds.right &&
+          event.clientY >= connectorBounds.top &&
+          event.clientY <= connectorBounds.bottom
+        : false
 
-      if (isInsideActor || isInsidePopover) {
-        nextHoveredActorId = actorElement.dataset.actorId ?? null
+      if (isInsideActor || isInsidePopover || isInsideConnector) {
+        nextHoveredActorId = actorId
       }
     })
 
     hoveredActorIdRef.current = nextHoveredActorId
     setHoveredActorId((current) => (current === nextHoveredActorId ? current : nextHoveredActorId))
-  }
-
-  function clearHoveredActor() {
-    hoveredActorIdRef.current = null
-    setHoveredActorId(null)
   }
 
   function enterPark(nextDrawings = drawings, nextSessionDrawingIds = sessionDrawingIds) {
@@ -834,6 +845,15 @@ function App() {
   const coasterA = toScenePoint(160, 286)
   const coasterB = toScenePoint(244, 250)
   const booth = toScenePoint(118, 222)
+  const hoveredActor = currentStep === 'park' ? actors.find((actor) => actor.id === hoveredActorId) ?? null : null
+  const hoveredActorScreenPoint = hoveredActor
+    ? toScenePoint(
+        getPathPoint(hoveredActor.routeIndex, hoveredActor.progress).x + hoveredActor.laneOffset,
+        getPathPoint(hoveredActor.routeIndex, hoveredActor.progress).y - hoveredActor.laneOffset,
+        getHopOffset(hoveredActor, now),
+      )
+    : null
+  const isHoveredPopoverBelow = hoveredActorScreenPoint ? hoveredActorScreenPoint.y < 360 : false
 
   return (
     <main className="dream-app">
@@ -1002,7 +1022,6 @@ function App() {
               <div className="park-window">
                 <div
                   className="park-scene"
-                  onPointerLeave={clearHoveredActor}
                   onPointerMove={updateHoveredActorFromPointer}
                 >
                   <svg
@@ -1108,32 +1127,11 @@ function App() {
                         <img
                           src={actor.imageData}
                           alt={actor.name}
-                          style={{ transform: `translate(-50%, -100%) scaleX(${actor.facing})` }}
+                          style={{ transform: `scaleX(${actor.facing})` }}
                         />
                         {actor.conversationUntil > now && actor.phrase ? (
                           <div className="speech-bubble">{actor.phrase}</div>
                         ) : null}
-                        <div className="actor-popover">
-                          <strong>{actor.name}</strong>
-                          <div className="actor-popover__image-frame">
-                            <img src={actor.imageData} alt="" />
-                          </div>
-                          <button
-                            type="button"
-                            className="actor-edit-button"
-                            aria-label={`Editar ${actor.name}`}
-                            onClick={() => {
-                              editDrawing({
-                                id: actor.id,
-                                name: actor.name,
-                                imageData: actor.imageData,
-                                createdAt: '',
-                              })
-                            }}
-                          >
-                            {'\u270e'}
-                          </button>
-                        </div>
                       </div>
                     )
                   })}
@@ -1142,6 +1140,52 @@ function App() {
             </div>
 
             <div className="park-mask" aria-hidden="true" style={{ backgroundImage: `url(${monsterBackdrop})` }} />
+
+            {hoveredActor && hoveredActorScreenPoint ? (
+              <div className="park-popover-layer">
+                <div
+                  className={[
+                    'actor-popover',
+                    'park-floating-popover',
+                    isHoveredPopoverBelow ? 'is-below' : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                  onPointerEnter={() => {
+                    hoveredActorIdRef.current = hoveredActor.id
+                    setHoveredActorId(hoveredActor.id)
+                  }}
+                  style={{
+                    left: `${hoveredActorScreenPoint.x}px`,
+                    top: `${
+                      isHoveredPopoverBelow
+                        ? hoveredActorScreenPoint.y + 2
+                        : hoveredActorScreenPoint.y - hoveredActor.size - 2
+                    }px`,
+                  }}
+                >
+                  <strong>{hoveredActor.name}</strong>
+                  <div className="actor-popover__image-frame">
+                    <img src={hoveredActor.imageData} alt="" />
+                  </div>
+                  <button
+                    type="button"
+                    className="actor-edit-button"
+                    aria-label={`Editar ${hoveredActor.name}`}
+                    onClick={() => {
+                      editDrawing({
+                        id: hoveredActor.id,
+                        name: hoveredActor.name,
+                        imageData: hoveredActor.imageData,
+                        createdAt: '',
+                      })
+                    }}
+                  >
+                    {'\u270e'}
+                  </button>
+                </div>
+              </div>
+            ) : null}
           </div>
         ) : null}
       </section>
