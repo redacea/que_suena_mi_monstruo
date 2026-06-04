@@ -362,10 +362,16 @@
 .park-actor {
   position: absolute;
   transform: translate(-50%, -100%);
-  pointer-events: none;
+  pointer-events: auto;
 }
 
-.park-actor img {
+.park-actor::before {
+  content: '';
+  position: absolute;
+  inset: -22px;
+}
+
+.park-actor > img {
   position: relative;
   display: block;
   width: 100%;
@@ -413,6 +419,95 @@
   border-bottom: 4px solid #111;
   background: #fffef4;
   transform: translateX(-50%) rotate(45deg);
+}
+
+.actor-popover {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  z-index: 4;
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  width: 154px;
+  padding: 10px;
+  border: 4px solid #111;
+  background: #fffef4;
+  color: #111;
+  font-family: 'Trebuchet MS', sans-serif;
+  text-align: center;
+  opacity: 0;
+  transform: translateX(-50%) translateY(8px);
+  transition: opacity 140ms ease, transform 140ms ease;
+  pointer-events: none;
+}
+
+.actor-popover::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  bottom: -13px;
+  width: 16px;
+  height: 16px;
+  border-right: 4px solid #111;
+  border-bottom: 4px solid #111;
+  background: #fffef4;
+  transform: translateX(-50%) rotate(45deg);
+}
+
+.park-actor:hover .actor-popover,
+.park-actor.is-hovered .actor-popover,
+.park-actor:focus-within .actor-popover {
+  opacity: 1;
+  transform: translateX(-50%);
+  pointer-events: auto;
+}
+
+.actor-popover strong {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-size: 0.84rem;
+  line-height: 1.1;
+}
+
+.actor-popover__image-frame {
+  display: grid;
+  place-items: center;
+  width: 82px;
+  height: 82px;
+  overflow: hidden;
+}
+
+.actor-popover__image-frame img {
+  position: static;
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transform: none !important;
+  filter: none;
+}
+
+.actor-edit-button {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 38px;
+  aspect-ratio: 1;
+  border: 3px solid #111;
+  border-radius: 999px;
+  background: #45d132;
+  color: #111;
+  font-size: 1.2rem;
+  font-weight: 900;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.actor-edit-button:focus-visible {
+  outline: 4px solid #1e90ff;
+  outline-offset: 2px;
 }
 
 .park-summary {

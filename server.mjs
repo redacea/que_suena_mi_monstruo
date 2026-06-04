@@ -9,7 +9,7 @@ const port = Number(process.env.PORT || 3001)
 const storageDir = path.join(__dirname, 'storage')
 const storageFile = path.join(storageDir, 'drawings.json')
 const distDir = path.join(__dirname, 'dist')
-const maxItems = 24
+const maxItems = 100
 
 let writeQueue = Promise.resolve()
 
@@ -91,10 +91,52 @@ app.post('/api/drawings', async (request, response) => {
   response.status(201).json(drawing)
 })
 
+app.put('/api/drawings/:id', async (request, response) => {
+  const id = typeof request.params.id === 'string' ? request.params.id : ''
+  const name = sanitizeName(request.body?.name)
+  const imageData = request.body?.imageData
+
+  if (!isValidImageData(imageData)) {
+    response.status(400).json({ message: 'Imagen invalida.' })
+    return
+  }
+
+  const updatedDrawing = await enqueueWrite(async () => {
+    const drawings = await readDrawings()
+    const drawingIndex = drawings.findIndex((drawing) => drawing.id === id)
+
+    if (drawingIndex === -1) {
+      return null
+    }
+
+    const updated = {
+      ...drawings[drawingIndex],
+      name,
+      imageData,
+    }
+
+    drawings[drawingIndex] = updated
+    await writeDrawings(drawings.slice(0, maxItems))
+    return updated
+  })
+
+  if (!updatedDrawing) {
+    response.status(404).json({ message: 'Dibujo no encontrado.' })
+    return
+  }
+
+  response.json(updatedDrawing)
+})
+
 if (await fs.access(distDir).then(() => true).catch(() => false)) {
   app.use(express.static(distDir))
 
-  app.get(/^(?!\/api).*/, (_request, response) => {
+  app.use((request, response, next) => {
+    if (request.path.startsWith('/api')) {
+      next()
+      return
+    }
+
     response.sendFile(path.join(distDir, 'index.html'))
   })
 }

@@ -45,8 +45,9 @@ type CanvasCursor = {
 type CanvasSnapshot = ImageData | null
 
 const CANVAS_SIZE = 280
-const POPULATION_LIMIT = 24
+const PARK_POPULATION_LIMIT = 20
 const BRUSH_COLORS = ['#000000', '#ffffff', '#eb5a46', '#48c0f0', '#f2dc36', '#58e63e', '#dc36e6', '#f0b63b']
+const ERASER_COLOR = '#ffffff'
 const BRUSH_SIZES = [4, 9, 16]
 const CHAT_LINES = [
   'Te subes conmigo, {name}?',
@@ -163,7 +164,49 @@ function createActor(drawing: DrawingRecord, index: number): ActorState {
 function syncActors(current: ActorState[], drawings: DrawingRecord[]) {
   const currentMap = new Map(current.map((actor) => [actor.id, actor]))
 
-  return drawings.map((drawing, index) => currentMap.get(drawing.id) ?? createActor(drawing, index))
+  return drawings.map((drawing, index) => {
+    const currentActor = currentMap.get(drawing.id)
+
+    if (!currentActor) {
+      return createActor(drawing, index)
+    }
+
+    return {
+      ...currentActor,
+      name: drawing.name,
+      imageData: drawing.imageData,
+    }
+  })
+}
+
+function shuffleDrawings(drawings: DrawingRecord[]) {
+  const shuffled = [...drawings]
+
+  for (let index = shuffled.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1))
+    const drawing = shuffled[index]
+    shuffled[index] = shuffled[swapIndex]
+    shuffled[swapIndex] = drawing
+  }
+
+  return shuffled
+}
+
+function selectParkDrawings(drawings: DrawingRecord[], sessionDrawingIds: string[]) {
+  const sessionIdSet = new Set(sessionDrawingIds)
+  const seen = new Set<string>()
+  const sessionDrawings = drawings.filter((drawing) => {
+    if (!sessionIdSet.has(drawing.id) || seen.has(drawing.id)) {
+      return false
+    }
+
+    seen.add(drawing.id)
+    return true
+  })
+  const randomDrawings = shuffleDrawings(drawings.filter((drawing) => !seen.has(drawing.id)))
+  const availableSlots = Math.max(PARK_POPULATION_LIMIT - sessionDrawings.length, 0)
+
+  return [...sessionDrawings, ...randomDrawings.slice(0, availableSlots)].slice(0, PARK_POPULATION_LIMIT)
 }
 
 function getHopOffset(actor: ActorState, timestamp: number) {
@@ -175,7 +218,7 @@ function getHopOffset(actor: ActorState, timestamp: number) {
   return Math.sin(progress * Math.PI) * actor.hopHeight
 }
 
-function stepActors(current: ActorState[], timestamp: number) {
+function stepActors(current: ActorState[], timestamp: number, pausedActorId: string | null) {
   if (current.length === 0) {
     return current
   }
@@ -186,6 +229,10 @@ function stepActors(current: ActorState[], timestamp: number) {
       ...actor,
       lastUpdatedAt: timestamp,
       phrase: timestamp > actor.conversationUntil ? '' : actor.phrase,
+    }
+
+    if (actor.id === pausedActorId) {
+      return updated
     }
 
     if (timestamp >= updated.nextHopAt) {
@@ -353,6 +400,32 @@ function restoreCanvasSnapshot(canvas: HTMLCanvasElement, snapshot: CanvasSnapsh
   context.putImageData(snapshot, 0, 0)
 }
 
+function snapshotFromImageDataUrl(imageData: string) {
+  return new Promise<ImageData>((resolve, reject) => {
+    const image = new Image()
+
+    image.onload = () => {
+      const canvas = document.createElement('canvas')
+      canvas.width = CANVAS_SIZE
+      canvas.height = CANVAS_SIZE
+
+      const context = canvas.getContext('2d')
+
+      if (!context) {
+        reject(new Error('No se pudo preparar el dibujo.'))
+        return
+      }
+
+      context.clearRect(0, 0, canvas.width, canvas.height)
+      context.drawImage(image, 0, 0, canvas.width, canvas.height)
+      resolve(context.getImageData(0, 0, canvas.width, canvas.height))
+    }
+
+    image.onerror = () => reject(new Error('No se pudo cargar el dibujo.'))
+    image.src = imageData
+  })
+}
+
 function isImageDataSnapshot(snapshot: CanvasSnapshot | string | undefined): snapshot is ImageData {
   return Boolean(snapshot && typeof snapshot === 'object' && 'data' in snapshot)
 }
@@ -361,13 +434,17 @@ function App() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const isDrawingRef = useRef(false)
   const lastPointRef = useRef<{ x: number; y: number } | null>(null)
-  const initializedRef = useRef(false)
+  const hoveredActorIdRef = useRef<string | null>(null)
 
   const [drawings, setDrawings] = useState<DrawingRecord[]>([])
+  const [parkDrawings, setParkDrawings] = useState<DrawingRecord[]>([])
+  const [sessionDrawingIds, setSessionDrawingIds] = useState<string[]>([])
   const [actors, setActors] = useState<ActorState[]>([])
+  const [hoveredActorId, setHoveredActorId] = useState<string | null>(null)
   const [creatureName, setCreatureName] = useState('')
   const [brushColor, setBrushColor] = useState(BRUSH_COLORS[0])
   const [brushSize, setBrushSize] = useState(BRUSH_SIZES[1])
+  const [editingDrawing, setEditingDrawing] = useState<DrawingRecord | null>(null)
   const [formMessage, setFormMessage] = useState('')
   const [isSaving, setIsSaving] = useState(false)
   const [loadError, setLoadError] = useState('')
@@ -388,7 +465,7 @@ function App() {
       setLoadError('')
 
       startTransition(() => {
-        setDrawings(data.slice(0, POPULATION_LIMIT))
+        setDrawings(data)
       })
     } catch {
       setLoadError('No puedo leer la coleccion compartida ahora mismo.')
@@ -396,7 +473,7 @@ function App() {
   })
 
   const animatePark = useEffectEvent((timestamp: number) => {
-    setActors((current) => stepActors(current, timestamp))
+    setActors((current) => stepActors(current, timestamp, hoveredActorIdRef.current))
   })
 
   useEffect(() => {
@@ -411,12 +488,34 @@ function App() {
     context.lineJoin = 'round'
     context.strokeStyle = brushColor
     context.lineWidth = brushSize
-
-    if (!initializedRef.current) {
-      context.clearRect(0, 0, canvas.width, canvas.height)
-      initializedRef.current = true
-    }
   }, [brushColor, brushSize])
+
+  useEffect(() => {
+    if (currentStep !== 'draw' || !editingDrawing) {
+      return
+    }
+
+    let isCancelled = false
+
+    snapshotFromImageDataUrl(editingDrawing.imageData)
+      .then((snapshot) => {
+        if (isCancelled) {
+          return
+        }
+
+        setUndoStack([snapshot])
+        setRedoStack([])
+      })
+      .catch(() => {
+        if (!isCancelled) {
+          setFormMessage('No puedo abrir ese monstruo para editarlo.')
+        }
+      })
+
+    return () => {
+      isCancelled = true
+    }
+  }, [currentStep, editingDrawing])
 
   useEffect(() => {
     if (currentStep !== 'draw') {
@@ -445,8 +544,14 @@ function App() {
   }, [])
 
   useEffect(() => {
-    setActors((current) => syncActors(current, drawings))
-  }, [drawings])
+    if (currentStep === 'park' && parkDrawings.length === 0 && drawings.length > 0) {
+      setParkDrawings(selectParkDrawings(drawings, sessionDrawingIds))
+    }
+  }, [currentStep, drawings, parkDrawings.length, sessionDrawingIds])
+
+  useEffect(() => {
+    setActors((current) => syncActors(current, parkDrawings))
+  }, [parkDrawings])
 
   useEffect(() => {
     let frameId = 0
@@ -558,18 +663,49 @@ function App() {
     setCanvasCursor((current) => ({ ...current, visible: false }))
   }
 
-  function clearCanvas() {
-    const canvas = canvasRef.current
-    const context = canvas?.getContext('2d')
+  function updateHoveredActorFromPointer(event: PointerEvent<HTMLDivElement>) {
+    const actorElements = event.currentTarget.querySelectorAll<HTMLElement>('.park-actor')
+    const hoverPadding = 28
+    let nextHoveredActorId: string | null = null
 
-    if (!canvas || !context) {
-      return
-    }
+    actorElements.forEach((actorElement) => {
+      if (nextHoveredActorId) {
+        return
+      }
 
-    context.clearRect(0, 0, canvas.width, canvas.height)
-    setUndoStack([null])
-    setRedoStack([])
-    setFormMessage('')
+      const bounds = actorElement.getBoundingClientRect()
+      const popoverBounds = actorElement.querySelector('.actor-popover')?.getBoundingClientRect()
+      const isInsideActor =
+        event.clientX >= bounds.left - hoverPadding &&
+        event.clientX <= bounds.right + hoverPadding &&
+        event.clientY >= bounds.top - hoverPadding &&
+        event.clientY <= bounds.bottom + hoverPadding
+      const isInsidePopover = popoverBounds
+        ? event.clientX >= popoverBounds.left &&
+          event.clientX <= popoverBounds.right &&
+          event.clientY >= popoverBounds.top &&
+          event.clientY <= popoverBounds.bottom
+        : false
+
+      if (isInsideActor || isInsidePopover) {
+        nextHoveredActorId = actorElement.dataset.actorId ?? null
+      }
+    })
+
+    hoveredActorIdRef.current = nextHoveredActorId
+    setHoveredActorId((current) => (current === nextHoveredActorId ? current : nextHoveredActorId))
+  }
+
+  function clearHoveredActor() {
+    hoveredActorIdRef.current = null
+    setHoveredActorId(null)
+  }
+
+  function enterPark(nextDrawings = drawings, nextSessionDrawingIds = sessionDrawingIds) {
+    setEditingDrawing(null)
+    setCanvasCursor((current) => ({ ...current, visible: false }))
+    setParkDrawings(selectParkDrawings(nextDrawings, nextSessionDrawingIds))
+    setCurrentStep('park')
   }
 
   function undoDrawing() {
@@ -600,8 +736,31 @@ function App() {
     setCreatureName('')
     setBrushColor(BRUSH_COLORS[0])
     setBrushSize(BRUSH_SIZES[1])
-    clearCanvas()
+    setEditingDrawing(null)
+    setUndoStack([null])
+    setRedoStack([])
+    setFormMessage('')
     setCurrentStep('draw')
+  }
+
+  function editDrawing(drawing: DrawingRecord) {
+    setCreatureName(drawing.name)
+    setBrushColor((current) => (current === ERASER_COLOR ? BRUSH_COLORS[0] : current))
+    setBrushSize(BRUSH_SIZES[1])
+    setEditingDrawing(drawing)
+    setUndoStack([null])
+    setRedoStack([])
+    setFormMessage('')
+    setCurrentStep('draw')
+  }
+
+  function cancelDrawing() {
+    setCreatureName('')
+    setEditingDrawing(null)
+    setUndoStack([null])
+    setRedoStack([])
+    setFormMessage('')
+    enterPark()
   }
 
   async function saveDrawing() {
@@ -620,8 +779,8 @@ function App() {
     setFormMessage('Guardando criatura...')
 
     try {
-      const response = await fetch('/api/drawings', {
-        method: 'POST',
+      const response = await fetch(editingDrawing ? `/api/drawings/${editingDrawing.id}` : '/api/drawings', {
+        method: editingDrawing ? 'PUT' : 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
@@ -636,15 +795,24 @@ function App() {
       }
 
       const created = (await response.json()) as DrawingRecord
+      const nextDrawings = [created, ...drawings.filter((drawing) => drawing.id !== created.id)]
+      let nextSessionDrawingIds = sessionDrawingIds
 
       startTransition(() => {
-        setDrawings((current) => [created, ...current].slice(0, POPULATION_LIMIT))
+        setDrawings(nextDrawings)
       })
 
+      if (!sessionDrawingIds.includes(created.id)) {
+        nextSessionDrawingIds = [created.id, ...sessionDrawingIds]
+        setSessionDrawingIds(nextSessionDrawingIds)
+      }
+
       setCreatureName('')
-      clearCanvas()
+      setEditingDrawing(null)
+      setUndoStack([null])
+      setRedoStack([])
       setFormMessage('Tu dibujo ya esta paseando por el parque.')
-      setCurrentStep('park')
+      enterPark(nextDrawings, nextSessionDrawingIds)
     } catch {
       setFormMessage('Fallo al guardar. Prueba otra vez.')
     } finally {
@@ -655,7 +823,10 @@ function App() {
   const now = performance.now()
   const polyline = linePoints(PATH_POINTS)
   const activeChats = Math.floor(actors.filter((actor) => actor.conversationUntil > now).length / 2)
-  const newestCreature = drawings[0]?.name ?? 'Nadie todavia'
+  const newestCreature = parkDrawings[0]?.name ?? 'Nadie todavia'
+  const availableBrushColors = editingDrawing
+    ? BRUSH_COLORS.filter((color) => color !== ERASER_COLOR)
+    : BRUSH_COLORS
 
   const ferrisWheel = toScenePoint(92, 120)
   const carousel = toScenePoint(260, 118)
@@ -674,7 +845,7 @@ function App() {
             <div className="intro-overlay">
               <h1 className="intro-title">¿QUÉ SUEÑA MI MONSTRUO?</h1>
 
-              <button type="button" className="monster-action monster-action--start" onClick={() => setCurrentStep('draw')}>
+              <button type="button" className="monster-action monster-action--start" onClick={() => enterPark()}>
                 Empezar
               </button>
             </div>
@@ -748,7 +919,7 @@ function App() {
                 </div>
 
                 <div className="draw-tools draw-tools--colors" aria-label="Paleta de color">
-                  {BRUSH_COLORS.map((color) => (
+                  {availableBrushColors.map((color) => (
                     <button
                       key={color}
                       type="button"
@@ -804,9 +975,7 @@ function App() {
                   type="button"
                   className="monster-action monster-action--cancel"
                   onClick={() => {
-                    clearCanvas()
-                    setCreatureName('')
-                    setCurrentStep('intro')
+                    cancelDrawing()
                   }}
                 >
                   Cancelar
@@ -831,7 +1000,11 @@ function App() {
 
             <div className="park-overlay">
               <div className="park-window">
-                <div className="park-scene">
+                <div
+                  className="park-scene"
+                  onPointerLeave={clearHoveredActor}
+                  onPointerMove={updateHoveredActorFromPointer}
+                >
                   <svg
                     className="park-svg"
                     viewBox="0 0 900 620"
@@ -907,10 +1080,23 @@ function App() {
                       getHopOffset(actor, now),
                     )
 
+                    const actorClassName = [
+                      'park-actor',
+                      actor.conversationUntil > now ? 'is-chatting' : '',
+                      hoveredActorId === actor.id ? 'is-hovered' : '',
+                    ]
+                      .filter(Boolean)
+                      .join(' ')
+
                     return (
                       <div
                         key={actor.id}
-                        className={actor.conversationUntil > now ? 'park-actor is-chatting' : 'park-actor'}
+                        data-actor-id={actor.id}
+                        className={actorClassName}
+                        onPointerEnter={() => {
+                          hoveredActorIdRef.current = actor.id
+                          setHoveredActorId(actor.id)
+                        }}
                         style={{
                           left: `${screenPoint.x}px`,
                           top: `${screenPoint.y}px`,
@@ -927,6 +1113,27 @@ function App() {
                         {actor.conversationUntil > now && actor.phrase ? (
                           <div className="speech-bubble">{actor.phrase}</div>
                         ) : null}
+                        <div className="actor-popover">
+                          <strong>{actor.name}</strong>
+                          <div className="actor-popover__image-frame">
+                            <img src={actor.imageData} alt="" />
+                          </div>
+                          <button
+                            type="button"
+                            className="actor-edit-button"
+                            aria-label={`Editar ${actor.name}`}
+                            onClick={() => {
+                              editDrawing({
+                                id: actor.id,
+                                name: actor.name,
+                                imageData: actor.imageData,
+                                createdAt: '',
+                              })
+                            }}
+                          >
+                            {'\u270e'}
+                          </button>
+                        </div>
                       </div>
                     )
                   })}
@@ -944,7 +1151,7 @@ function App() {
           <div className="park-info-row">
             <div className="info-chip">
               <span>Habitantes</span>
-              <strong>{drawings.length}</strong>
+              <strong>{parkDrawings.length}</strong>
             </div>
             <div className="info-chip">
               <span>Charlas</span>
@@ -957,7 +1164,7 @@ function App() {
           </div>
 
           <button type="button" className="park-restart" onClick={restartDrawing}>
-            Dibujar otro
+            Dibujar monstruo
           </button>
         </div>
       ) : null}
