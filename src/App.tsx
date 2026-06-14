@@ -1,5 +1,6 @@
 import {
   startTransition,
+  useCallback,
   useEffect,
   useEffectEvent,
   useRef,
@@ -430,7 +431,64 @@ function isImageDataSnapshot(snapshot: CanvasSnapshot | string | undefined): sna
   return Boolean(snapshot && typeof snapshot === 'object' && 'data' in snapshot)
 }
 
+function formatDrawingDate(value: string) {
+  const date = new Date(value)
+
+  if (Number.isNaN(date.getTime())) {
+    return 'Sin fecha'
+  }
+
+  return new Intl.DateTimeFormat('es', {
+    dateStyle: 'short',
+    timeStyle: 'short',
+  }).format(date)
+}
+
+function getAdminHeaders(extraHeaders: Record<string, string> = {}) {
+  const token = document.querySelector<HTMLMetaElement>('meta[name="monstruo-admin-token"]')?.content
+
+  return token ? { ...extraHeaders, 'X-Admin-Token': token } : extraHeaders
+}
+
+function requestAdminJson<T>(
+  url: string,
+  options: {
+    body?: unknown
+    headers?: Record<string, string>
+    method?: string
+  } = {},
+) {
+  return new Promise<T>((resolve, reject) => {
+    const request = new XMLHttpRequest()
+    const headers = getAdminHeaders(options.headers)
+
+    request.open(options.method ?? 'GET', url)
+    request.withCredentials = true
+
+    Object.entries(headers).forEach(([name, value]) => {
+      request.setRequestHeader(name, value)
+    })
+
+    request.onload = () => {
+      if (request.status < 200 || request.status >= 300) {
+        reject(new Error(`HTTP ${request.status}`))
+        return
+      }
+
+      try {
+        resolve(JSON.parse(request.responseText) as T)
+      } catch (error) {
+        reject(error)
+      }
+    }
+
+    request.onerror = () => reject(new Error('Error de red'))
+    request.send(options.body ? JSON.stringify(options.body) : undefined)
+  })
+}
+
 function App() {
+  const isAdminPage = window.location.pathname === '/admin' || window.location.pathname.startsWith('/admin/')
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const isDrawingRef = useRef(false)
   const lastPointRef = useRef<{ x: number; y: number } | null>(null)
@@ -452,6 +510,12 @@ function App() {
   const [canvasCursor, setCanvasCursor] = useState<CanvasCursor>({ x: 0, y: 0, visible: false })
   const [undoStack, setUndoStack] = useState<CanvasSnapshot[]>([null])
   const [redoStack, setRedoStack] = useState<CanvasSnapshot[]>([])
+  const [adminDrawings, setAdminDrawings] = useState<DrawingRecord[]>([])
+  const [selectedAdminDrawingIds, setSelectedAdminDrawingIds] = useState<Set<string>>(new Set())
+  const [adminMessage, setAdminMessage] = useState('')
+  const [isAdminLoading, setIsAdminLoading] = useState(false)
+  const [isAdminDeleting, setIsAdminDeleting] = useState(false)
+  const [animationTimestamp, setAnimationTimestamp] = useState(0)
 
   const refreshDrawings = useEffectEvent(async () => {
     try {
@@ -471,6 +535,27 @@ function App() {
       setLoadError('No puedo leer la coleccion compartida ahora mismo.')
     }
   })
+
+  const refreshAdminDrawings = useCallback(async () => {
+    setIsAdminLoading(true)
+
+    try {
+      const data = await requestAdminJson<DrawingRecord[]>('/api/admin/drawings')
+
+      startTransition(() => {
+        setAdminDrawings(data)
+        setSelectedAdminDrawingIds((current) => {
+          const availableIds = new Set(data.map((drawing) => drawing.id))
+          return new Set([...current].filter((id) => availableIds.has(id)))
+        })
+      })
+      setAdminMessage('')
+    } catch {
+      setAdminMessage('No puedo cargar la administracion de dibujos ahora mismo.')
+    } finally {
+      setIsAdminLoading(false)
+    }
+  }, [])
 
   const animatePark = useEffectEvent((timestamp: number) => {
     setActors((current) => stepActors(current, timestamp, hoveredActorIdRef.current))
@@ -534,29 +619,63 @@ function App() {
   }, [currentStep, undoStack])
 
   useEffect(() => {
-    void refreshDrawings()
+    if (isAdminPage) {
+      return
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void refreshDrawings()
+    }, 0)
 
     const intervalId = window.setInterval(() => {
       void refreshDrawings()
     }, 12000)
 
-    return () => window.clearInterval(intervalId)
-  }, [])
+    return () => {
+      window.clearTimeout(timeoutId)
+      window.clearInterval(intervalId)
+    }
+  }, [isAdminPage])
+
+  useEffect(() => {
+    if (!isAdminPage) {
+      return
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      void refreshAdminDrawings()
+    }, 0)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [isAdminPage, refreshAdminDrawings])
 
   useEffect(() => {
     if (currentStep === 'park' && parkDrawings.length === 0 && drawings.length > 0) {
-      setParkDrawings(selectParkDrawings(drawings, sessionDrawingIds))
+      const timeoutId = window.setTimeout(() => {
+        setParkDrawings(selectParkDrawings(drawings, sessionDrawingIds))
+      }, 0)
+
+      return () => window.clearTimeout(timeoutId)
     }
   }, [currentStep, drawings, parkDrawings.length, sessionDrawingIds])
 
   useEffect(() => {
-    setActors((current) => syncActors(current, parkDrawings))
+    const timeoutId = window.setTimeout(() => {
+      setActors((current) => syncActors(current, parkDrawings))
+    }, 0)
+
+    return () => window.clearTimeout(timeoutId)
   }, [parkDrawings])
 
   useEffect(() => {
+    if (isAdminPage) {
+      return
+    }
+
     let frameId = 0
 
     const frame = (timestamp: number) => {
+      setAnimationTimestamp(timestamp)
       animatePark(timestamp)
       frameId = window.requestAnimationFrame(frame)
     }
@@ -564,7 +683,7 @@ function App() {
     frameId = window.requestAnimationFrame(frame)
 
     return () => window.cancelAnimationFrame(frameId)
-  }, [])
+  }, [isAdminPage])
 
   function toCanvasPoint(event: PointerEvent<HTMLCanvasElement>) {
     const canvas = canvasRef.current
@@ -831,7 +950,179 @@ function App() {
     }
   }
 
-  const now = performance.now()
+  function toggleAdminDrawing(id: string) {
+    setSelectedAdminDrawingIds((current) => {
+      const next = new Set(current)
+
+      if (next.has(id)) {
+        next.delete(id)
+      } else {
+        next.add(id)
+      }
+
+      return next
+    })
+  }
+
+  function toggleAllAdminDrawings() {
+    setSelectedAdminDrawingIds((current) => {
+      if (current.size === adminDrawings.length) {
+        return new Set()
+      }
+
+      return new Set(adminDrawings.map((drawing) => drawing.id))
+    })
+  }
+
+  async function deleteAdminDrawings(ids: string[]) {
+    if (ids.length === 0) {
+      return
+    }
+
+    setIsAdminDeleting(true)
+    setAdminMessage('Eliminando dibujos...')
+
+    try {
+      const result = await requestAdminJson<{ deletedCount: number }>('/api/admin/drawings', {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: { ids },
+      })
+      const deletedIds = new Set(ids)
+
+      startTransition(() => {
+        setAdminDrawings((current) => current.filter((drawing) => !deletedIds.has(drawing.id)))
+        setSelectedAdminDrawingIds((current) => {
+          const next = new Set(current)
+          ids.forEach((id) => next.delete(id))
+          return next
+        })
+      })
+      setAdminMessage(
+        result.deletedCount === 1
+          ? 'Dibujo eliminado del servidor.'
+          : `${result.deletedCount} dibujos eliminados del servidor.`,
+      )
+    } catch {
+      setAdminMessage('No se pudieron eliminar los dibujos. Prueba otra vez.')
+    } finally {
+      setIsAdminDeleting(false)
+    }
+  }
+
+  function confirmDeleteOne(drawing: DrawingRecord) {
+    const shouldDelete = window.confirm(`Eliminar "${drawing.name}" definitivamente del servidor?`)
+
+    if (shouldDelete) {
+      void deleteAdminDrawings([drawing.id])
+    }
+  }
+
+  function confirmDeleteSelected() {
+    const selectedIds = [...selectedAdminDrawingIds]
+    const shouldDelete = window.confirm(
+      `Eliminar ${selectedIds.length} dibujos definitivamente del servidor?`,
+    )
+
+    if (shouldDelete) {
+      void deleteAdminDrawings(selectedIds)
+    }
+  }
+
+  const selectedAdminCount = selectedAdminDrawingIds.size
+
+  if (isAdminPage) {
+    return (
+      <main className="admin-app">
+        <header className="admin-header">
+          <div>
+            <p className="admin-kicker">Administracion</p>
+            <h1>Todos los dibujos</h1>
+          </div>
+
+          <div className="admin-actions">
+            <button
+              type="button"
+              className="admin-button admin-button--secondary"
+              disabled={adminDrawings.length === 0 || isAdminDeleting}
+              onClick={toggleAllAdminDrawings}
+            >
+              {selectedAdminCount === adminDrawings.length && adminDrawings.length > 0
+                ? 'Quitar seleccion'
+                : 'Seleccionar todos'}
+            </button>
+
+            <button
+              type="button"
+              className="admin-button admin-button--danger"
+              disabled={selectedAdminCount === 0 || isAdminDeleting}
+              onClick={confirmDeleteSelected}
+            >
+              Eliminar seleccionados
+            </button>
+          </div>
+        </header>
+
+        <div className="admin-status-row">
+          <span>{adminDrawings.length} dibujos</span>
+          <span>{selectedAdminCount} seleccionados</span>
+          <button type="button" className="admin-link-button" disabled={isAdminLoading} onClick={() => void refreshAdminDrawings()}>
+            Actualizar
+          </button>
+        </div>
+
+        {adminMessage ? <p className="admin-message">{adminMessage}</p> : null}
+
+        {isAdminLoading ? <p className="admin-empty">Cargando dibujos...</p> : null}
+
+        {!isAdminLoading && adminDrawings.length === 0 ? (
+          <p className="admin-empty">Todavia no hay dibujos guardados.</p>
+        ) : null}
+
+        <section className="admin-mosaic" aria-label="Dibujos guardados">
+          {adminDrawings.map((drawing) => {
+            const isSelected = selectedAdminDrawingIds.has(drawing.id)
+
+            return (
+              <article key={drawing.id} className={isSelected ? 'admin-card is-selected' : 'admin-card'}>
+                <label className="admin-select">
+                  <input
+                    type="checkbox"
+                    checked={isSelected}
+                    onChange={() => toggleAdminDrawing(drawing.id)}
+                  />
+                  <span>Elegir</span>
+                </label>
+
+                <button
+                  type="button"
+                  className="admin-delete-button"
+                  aria-label={`Eliminar ${drawing.name}`}
+                  disabled={isAdminDeleting}
+                  onClick={() => confirmDeleteOne(drawing)}
+                >
+                  X
+                </button>
+
+                <div className="admin-image-frame">
+                  <img src={drawing.imageData} alt={drawing.name} />
+                </div>
+
+                <div className="admin-card-caption">
+                  <strong>{drawing.name}</strong>
+                  <span>{formatDrawingDate(drawing.createdAt)}</span>
+                </div>
+              </article>
+            )
+          })}
+        </section>
+      </main>
+    )
+  }
+
+  const now = animationTimestamp
   const polyline = linePoints(PATH_POINTS)
   const activeChats = Math.floor(actors.filter((actor) => actor.conversationUntil > now).length / 2)
   const newestCreature = parkDrawings[0]?.name ?? 'Nadie todavia'
